@@ -27,11 +27,13 @@ def construct_scriptable_recurrent(cfg_arch, vocab_size, downstream_classes=None
     cfg_arch.embedding.vocab_size = vocab_size
     cfg_arch.num_labels = downstream_classes
 
-    if downstream_classes is None:
-        model = BPTTforPreTraining(ScriptableRecurrentLM(cfg_arch), cfg_arch)
-    else:
-        model = ScriptableLMForSequenceClassification(ScriptableRecurrentLM(cfg_arch), cfg_arch)
-    return model
+    return (
+        BPTTforPreTraining(ScriptableRecurrentLM(cfg_arch), cfg_arch)
+        if downstream_classes is None
+        else ScriptableLMForSequenceClassification(
+            ScriptableRecurrentLM(cfg_arch), cfg_arch
+        )
+    )
 
 
 """This is the simplified version that should be the default for all models later..."""
@@ -77,13 +79,12 @@ class TransformerLayerSimplified(torch.nn.Module):
             else:
                 states = self.fn_eval(states, self.attn(self.norm1(states), attention_mask), self.alpha, self.alpha)
                 states = self.fn_eval(states, self.ffn(self.norm2(states)), self.alpha, self.alpha)
+        elif self.training:
+            states = self.norm1(self.fn_training(states, self.attn(states, attention_mask), self.alpha, self.alpha))
+            states = self.norm2(self.fn_training(states, self.ffn(states), self.alpha, self.alpha))
         else:
-            if self.training:
-                states = self.norm1(self.fn_training(states, self.attn(states, attention_mask), self.alpha, self.alpha))
-                states = self.norm2(self.fn_training(states, self.ffn(states), self.alpha, self.alpha))
-            else:
-                states = self.norm1(self.fn_eval(states, self.attn(states, attention_mask), self.alpha, self.alpha))
-                states = self.norm2(self.fn_eval(states, self.ffn(states), self.alpha, self.alpha))
+            states = self.norm1(self.fn_eval(states, self.attn(states, attention_mask), self.alpha, self.alpha))
+            states = self.norm2(self.fn_eval(states, self.ffn(states), self.alpha, self.alpha))
 
         return states
 
@@ -115,7 +116,7 @@ class ScriptableRecurrentLM(torch.nn.Module):
 
         hidden_states = self.forward_embed(input_ids)
         # Main transformer blocks::
-        for i in range(self.cfg.maximal_recurrence):
+        for _ in range(self.cfg.maximal_recurrence):
             hidden_states = self.forward_step(hidden_states, attention_mask)
         hidden_states = self.exit(hidden_states)
         return hidden_states
@@ -146,15 +147,15 @@ class BPTTforPreTraining(torch.nn.Module):
         self.cfg = cfg_arch
 
         self.encoder = encoder
-        if not cfg_arch.skip_head_transform:
-            self.prediction_head = PredictionHeadComponent(cfg_arch)
-        else:
-            self.prediction_head = torch.nn.Linear(
+        self.prediction_head = (
+            torch.nn.Linear(
                 cfg_arch.hidden_size,
                 cfg_arch.embedding.embedding_dim,
                 bias=cfg_arch.use_bias,
             )
-
+            if cfg_arch.skip_head_transform
+            else PredictionHeadComponent(cfg_arch)
+        )
         if self.cfg.tie_weights:
             self.decoder = torch.nn.Linear(cfg_arch.embedding.embedding_dim, cfg_arch.embedding.vocab_size, bias=cfg_arch.decoder_bias)
             self.decoder.weight = self.encoder.embedding.word_embedding.weight
@@ -197,7 +198,7 @@ class BPTTforPreTraining(torch.nn.Module):
         # Main transformer blocks::
         total_loss = 0
 
-        for i in range(self.cfg.maximal_recurrence):
+        for _ in range(self.cfg.maximal_recurrence):
             hidden_states = self.forward_step(hidden_states, attention_mask)
             early_exit_states = hidden_states.view(-1, outputs.shape[-1])
             masked_lm_loss_per_token = self.loss_fn(early_exit_states, seq_first_labels.view(-1))
@@ -260,19 +261,19 @@ class BPTTforPreTraining(torch.nn.Module):
             labels = labels[mask_positions]
 
         outputs = self.decoder(self.prediction_head(outputs))
-        if labels is not None:
-            masked_lm_loss = self.loss_fn(outputs, labels)
-        else:
-            masked_lm_loss = outputs.new_zeros((1,))
-        return masked_lm_loss
+        return (
+            self.loss_fn(outputs, labels)
+            if labels is not None
+            else outputs.new_zeros((1,))
+        )
 
     def _prediction_fixed(self, outputs: torch.Tensor, labels: Optional[torch.Tensor] = None):
         outputs = self.decoder(self.prediction_head(outputs))
-        if labels is not None:
-            masked_lm_loss = self.loss_fn(outputs, labels.view(-1))
-        else:
-            masked_lm_loss = outputs.new_zeros((1,))
-        return masked_lm_loss
+        return (
+            self.loss_fn(outputs, labels.view(-1))
+            if labels is not None
+            else outputs.new_zeros((1,))
+        )
 
 
 class SequentialwithMask(torch.nn.Module):

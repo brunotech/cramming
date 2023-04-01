@@ -51,8 +51,7 @@ def _get_sane_token_args():
 
 def _get_sane_normalizers(force_english_keyboard=False, force_lowercase=False, strip_accents=False, whitespace_escape=False):
     """original rules as in XLNET with optional modifications. force_english_keyboard is actually an ascii normalization."""
-    normalize_ops = []
-    normalize_ops.append(normalizers.Replace("``", '"'))
+    normalize_ops = [normalizers.Replace("``", '"')]
     normalize_ops.append(normalizers.Replace("''", '"'))
     normalize_ops.append(normalizers.NFD() if strip_accents else normalizers.NFKC())
     if force_lowercase:
@@ -96,7 +95,7 @@ def _construct_tokenizer(raw_datasets, cfg_data, known_tokens=[]):
         tokenizer.normalizer = normalizer_sequence
         tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
         # tokenizer.decoder = None
-        special_tokens = list(set(v for k, v in special_token_args.items()))
+        special_tokens = list({v for k, v in special_token_args.items()})
 
         trainer = trainers.UnigramTrainer(
             vocab_size=cfg_data.vocab_size,
@@ -156,7 +155,7 @@ def _construct_tokenizer(raw_datasets, cfg_data, known_tokens=[]):
         tokenizer.normalizer = normalizer_sequence
         tokenizer.pre_tokenizer = pre_tokenizers.Metaspace(replacement="▁", add_prefix_space=True)
         tokenizer.decoder = decoders.Metaspace(replacement="▁", add_prefix_space=True)
-        special_tokens = list(set(v for k, v in special_token_args.items()))
+        special_tokens = list({v for k, v in special_token_args.items()})
 
         trainer = trainers.UnigramTrainer(
             vocab_size=cfg_data.vocab_size,
@@ -180,9 +179,9 @@ def _construct_tokenizer(raw_datasets, cfg_data, known_tokens=[]):
     type_id = str(1) if cfg_data.use_type_ids else str(0)
     single_template = "$A"
     if cfg_data.include_cls_token_in_corpus:
-        single_template = "<cls> " + single_template
+        single_template = f"<cls> {single_template}"
     if cfg_data.include_sep_token_in_corpus:
-        single_template = single_template + " <sep>"
+        single_template += " <sep>"
     tokenizer.post_processor = processors.TemplateProcessing(
         single=single_template,
         pair=f"<cls>:0 $A:0 <sep>:0 $B:{type_id} <sep>:{type_id}",

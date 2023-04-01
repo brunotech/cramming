@@ -35,20 +35,18 @@ class ProgressiveBatching(MetaOptimizer):
         self.update_sample_statistics()
         if self.accumulated_steps < self.min_sample_guard:
             rule_check = False
+        elif self.accumulated_steps > self.max_sample_guard:
+            rule_check = True
+        elif self.progress_rule == "norm-based":
+            rule_check = self.norm_test()
+        elif self.progress_rule == "inner-product":
+            rule_check = self.inner_product_test()
+        elif self.progress_rule == "cov":
+            rule_check = self.coefficient_of_variation()
+        elif self.progress_rule == "cosine":
+            rule_check = self.cosine_test()
         else:
-            if self.accumulated_steps > self.max_sample_guard:
-                rule_check = True
-            else:
-                if self.progress_rule == "norm-based":
-                    rule_check = self.norm_test()
-                elif self.progress_rule == "inner-product":
-                    rule_check = self.inner_product_test()
-                elif self.progress_rule == "cov":
-                    rule_check = self.coefficient_of_variation()
-                elif self.progress_rule == "cosine":
-                    rule_check = self.cosine_test()
-                else:
-                    raise ValueError(f"Invalid progress rules {self.progress_rule} given.")
+            raise ValueError(f"Invalid progress rules {self.progress_rule} given.")
 
         if rule_check:
             self.copy_mean_grad()  # reference running mean in p.grad attributes
@@ -56,9 +54,6 @@ class ProgressiveBatching(MetaOptimizer):
                 self.min_sample_guard = self.accumulated_steps  # raise lower limit if forcing monotone batch sizes
             self.reset_sample_statistics()  # reset running mean
             super().step()
-        else:
-            # otherwise defer the step and accumulate more gradients
-            pass
 
     def inner_product_test(self):
         """Inner product similar to description in Bollapragada,Byrd,Nocedal, "Adaptive Sampling Strategies for Stochastic Optimization".

@@ -112,15 +112,20 @@ def _make_suffix_array(text_file, tmpdir, path_to_rust_code):
             size_data = os.path.getsize(x)
             FACT = np.ceil(np.log(size_data) / np.log(2) / 8)
             # print("FACT", FACT)
-            size_table = os.path.getsize(x + ".table.bin")
-            if not os.path.exists(x) or not os.path.exists(x + ".table.bin") or size_table == 0 or size_data * FACT != size_table:
+            size_table = os.path.getsize(f"{x}.table.bin")
+            if (
+                not os.path.exists(x)
+                or not os.path.exists(f"{x}.table.bin")
+                or size_table == 0
+                or size_data * FACT != size_table
+            ):
                 cmd = f"{path_to_rust_code}/dedup_dataset make-part --data-file {text_file} --start-byte {s} --end-byte {e}"
                 # print(cmd)
                 wait.append(os.popen(cmd))
         print("Rerunning", len(wait), "jobs because they failed.")
         [x.read() for x in wait]
         time.sleep(1)
-        if len(wait) == 0:
+        if not wait:
             break
 
     print("Merging suffix trees")
@@ -143,8 +148,7 @@ def _finish_and_return_to_hf_dataset(original_text_file, remove_file_cache):
         for line in fin:
             if "out" in line:
                 break
-        for line in fin:
-            remove.append(list(map(int, line.split())))
+        remove.extend(list(map(int, line.split())) for line in fin)
         remove = remove[::-1]
 
     print(f"Number of removal tuples is {len(remove)}")
@@ -165,5 +169,4 @@ def _finish_and_return_to_hf_dataset(original_text_file, remove_file_cache):
                 buffer = buf_split[-1]
         deduped_dataset["text"] += (buffer + original_dataset.read().decode("utf-8")).split("<EOT>")[:-1]
 
-    dataset = datasets.Dataset.from_dict(deduped_dataset)
-    return dataset
+    return datasets.Dataset.from_dict(deduped_dataset)

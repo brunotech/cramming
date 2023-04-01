@@ -36,55 +36,54 @@ def load_pretraining_corpus(cfg_data, cfg_impl):
     if list(cfg_data.sources.values())[0]["provider"] == "fake":
         # Shortcut for fake data
         return _load_fake_dataset(cfg_data, list(cfg_data.sources.values())[0], path=cfg_impl.path)
-    else:
-        try:
-            if cfg_impl.local_staging_dir is not None:
-                with main_process_first():
-                    data_path = stage_dataset(data_path, cfg_impl.local_staging_dir)
-            # Load already processed dataset
-            tokenized_dataset = datasets.load_from_disk(data_path)
-            tokenizer = load_tokenizer(
-                os.path.join(data_path, "tokenizer"),
-                seq_length=cfg_data.seq_length,
-                vocab_size=cfg_data.vocab_size,
-                cache_dir=cfg_impl.path,
-            )
-        except FileNotFoundError:
-            if cfg_impl.forbid_dataset_preprocessing:
-                raise ValueError(f"Cannot find processed at path {data_path}. Dataset preprocessing disabled.")
-            # Run preprocessing to create dataset
+    try:
+        if cfg_impl.local_staging_dir is not None:
             with main_process_first():
-                num_threads = min(torch.get_num_threads(), cfg_impl.threads)  # Mitigate worker overloading
-                preprocessed_dataset, new_tokenizer = preprocess_dataset(
-                    cfg_data,
-                    download_path=cfg_impl.path,
-                    num_threads=num_threads,
-                )
-
-                def save_corpus(path):
-                    preprocessed_dataset.save_to_disk(path)
-                    new_tokenizer.save_pretrained(os.path.join(path, "tokenizer"))
-                    with open(os.path.join(path, "model_config.json"), "w") as file:
-                        json.dump(OmegaConf.to_container(cfg_data, resolve=True), file)
-
-                if not cfg_impl.temporary_corpus:
-                    # Save to base directory:
-                    save_corpus(os.path.join(cfg_impl.path, processed_dataset_dir))
-                    if cfg_impl.local_staging_dir is not None:
-                        # Optionally also copy into local staging directory
-                        data_path = stage_dataset(data_path, cfg_impl.local_staging_dir)
-                else:
-                    # Directly use staging directory
-                    save_corpus(os.path.join(cfg_impl.local_staging_dir, processed_dataset_dir))
-
-            # Reload dataset
-            tokenized_dataset = datasets.load_from_disk(data_path)
-            tokenizer = load_tokenizer(
-                os.path.join(data_path, "tokenizer"),
-                seq_length=cfg_data.seq_length,
-                vocab_size=cfg_data.vocab_size,
-                cache_dir=cfg_impl.path,
+                data_path = stage_dataset(data_path, cfg_impl.local_staging_dir)
+        # Load already processed dataset
+        tokenized_dataset = datasets.load_from_disk(data_path)
+        tokenizer = load_tokenizer(
+            os.path.join(data_path, "tokenizer"),
+            seq_length=cfg_data.seq_length,
+            vocab_size=cfg_data.vocab_size,
+            cache_dir=cfg_impl.path,
+        )
+    except FileNotFoundError:
+        if cfg_impl.forbid_dataset_preprocessing:
+            raise ValueError(f"Cannot find processed at path {data_path}. Dataset preprocessing disabled.")
+        # Run preprocessing to create dataset
+        with main_process_first():
+            num_threads = min(torch.get_num_threads(), cfg_impl.threads)  # Mitigate worker overloading
+            preprocessed_dataset, new_tokenizer = preprocess_dataset(
+                cfg_data,
+                download_path=cfg_impl.path,
+                num_threads=num_threads,
             )
+
+            def save_corpus(path):
+                preprocessed_dataset.save_to_disk(path)
+                new_tokenizer.save_pretrained(os.path.join(path, "tokenizer"))
+                with open(os.path.join(path, "model_config.json"), "w") as file:
+                    json.dump(OmegaConf.to_container(cfg_data, resolve=True), file)
+
+            if not cfg_impl.temporary_corpus:
+                # Save to base directory:
+                save_corpus(os.path.join(cfg_impl.path, processed_dataset_dir))
+                if cfg_impl.local_staging_dir is not None:
+                    # Optionally also copy into local staging directory
+                    data_path = stage_dataset(data_path, cfg_impl.local_staging_dir)
+            else:
+                # Directly use staging directory
+                save_corpus(os.path.join(cfg_impl.local_staging_dir, processed_dataset_dir))
+
+        # Reload dataset
+        tokenized_dataset = datasets.load_from_disk(data_path)
+        tokenizer = load_tokenizer(
+            os.path.join(data_path, "tokenizer"),
+            seq_length=cfg_data.seq_length,
+            vocab_size=cfg_data.vocab_size,
+            cache_dir=cfg_impl.path,
+        )
 
     # Cast to tensors after loading from arrow:
     tokenized_dataset.set_format("torch")
@@ -157,10 +156,12 @@ def preprocess_dataset(cfg_data, download_path, num_threads=1):
         raw_data = raw_data.take(int(cfg_data.max_entries_in_raw_dataset))
         # I'm tired of IterableDatasets and will take the performance hit to write them out instead:
         with tempfile.TemporaryDirectory() as tmpdirname:
-            datasets.Dataset.from_dict(dict(text=[v["text"] for v in raw_data])).save_to_disk(tmpdirname + "raw_data")
-            raw_data = datasets.load_from_disk(tmpdirname + "raw_data")
-        # This used to be only a move into RAM but this breaks memory later using C4:
-        # raw_data = datasets.Dataset.from_dict(dict(text=[v["text"] for v in raw_data]))
+            datasets.Dataset.from_dict(
+                dict(text=[v["text"] for v in raw_data])
+            ).save_to_disk(f"{tmpdirname}raw_data")
+            raw_data = datasets.load_from_disk(f"{tmpdirname}raw_data")
+            # This used to be only a move into RAM but this breaks memory later using C4:
+            # raw_data = datasets.Dataset.from_dict(dict(text=[v["text"] for v in raw_data]))
 
     raw_data = raw_data.shuffle(seed=89)  # Shuffle once here so that multiproc has shards of similar size!
     # This shuffle is crucial for fast multiprocessing tokenization
@@ -267,7 +268,7 @@ def _concatenate_entries(dataset, num_entries_in_group, num_threads):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     def group_texts(examples):
-        result = dict()
+        result = {}
         for key, entries in examples.items():
             reduced_list = []
             state, num_collected = None, 0
@@ -346,7 +347,9 @@ def raw_dataset_preprocessing(raw_dataset, num_threads, cfg_data):
         def named_entity_simplification(examples):
             # https://stackoverflow.com/questions/58712418/replace-entity-with-its-label-in-spacy
             for idx, doc in enumerate(nlp.pipe(examples[text_column_name], batch_size=1024)):
-                examples[text_column_name][idx] = " ".join([t.text if not t.ent_type_ else t.ent_type_ for t in doc])
+                examples[text_column_name][idx] = " ".join(
+                    [t.ent_type_ or t.text for t in doc]
+                )
             return examples
 
         raw_dataset = raw_dataset.map(named_entity_simplification, desc="Simplify all named entities in dataset.", **map_setup)

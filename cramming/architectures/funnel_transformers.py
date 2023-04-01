@@ -16,11 +16,13 @@ def construct_scriptable_funnel(cfg_arch, vocab_size, downstream_classes=None):
     """See the config file for details on what is possible."""
     cfg_arch.embedding.vocab_size = vocab_size
     cfg_arch.num_labels = downstream_classes
-    if downstream_classes is None:
-        model = ScriptableLMForPreTraining(ScriptableFunnelLM(cfg_arch), cfg_arch)
-    else:
-        model = ScriptableLMForSequenceClassification(ScriptableFunnelLM(cfg_arch), cfg_arch)
-    return model
+    return (
+        ScriptableLMForPreTraining(ScriptableFunnelLM(cfg_arch), cfg_arch)
+        if downstream_classes is None
+        else ScriptableLMForSequenceClassification(
+            ScriptableFunnelLM(cfg_arch), cfg_arch
+        )
+    )
 
 
 class FunnelAttentionComponent(torch.nn.Module):
@@ -106,7 +108,7 @@ class ScriptableFunnelLM(torch.nn.Module):
         self.num_transformer_layers = len(cfg_arch.setup)
         layers = []
         seq_length_in = cfg_arch.setup[0]
-        for idx, layer_spec in enumerate(cfg_arch.setup[1:]):
+        for layer_spec in cfg_arch.setup[1:]:
             seq_length_out = layer_spec
             layers.append(torch.jit.script(FunnelLayer(cfg_arch, seq_length_in, seq_length_out)))
             seq_length_in = layer_spec

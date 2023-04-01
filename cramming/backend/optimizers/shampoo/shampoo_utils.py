@@ -103,9 +103,10 @@ def multi_dim_cat(split_grad: List[Tensor], num_splits: List[int]) -> Tensor:
     merged_grad = split_grad
     for dim, split in reversed(list(enumerate(num_splits))):
         if split > 0:
-            temp_grad = []
-            for i in range(0, len(merged_grad), split):
-                temp_grad.append(torch.cat(merged_grad[i : i + split], dim=dim))
+            temp_grad = [
+                torch.cat(merged_grad[i : i + split], dim=dim)
+                for i in range(0, len(merged_grad), split)
+            ]
             merged_grad = temp_grad
 
     return merged_grad[0]
@@ -117,7 +118,6 @@ class Preconditioner(ABC):
 
     def __init__(self):
         self._parameter_count = 0
-        pass
 
     def update_preconditioners(self, grad: Tensor) -> None:
         pass
@@ -213,8 +213,7 @@ class AdagradPreconditioner(Preconditioner):
 
     def compute_norm(self, grad: Tensor):
         denom = (self.preconditioner / self.bias_correction2).sqrt().add_(self.epsilon)
-        adagrad_nrm = torch.linalg.norm(grad / denom)
-        return adagrad_nrm
+        return torch.linalg.norm(grad / denom)
 
 
 class ShampooPreconditioner(Preconditioner):
@@ -254,9 +253,8 @@ class ShampooPreconditioner(Preconditioner):
 
         super(ShampooPreconditioner, self).__init__()
 
-        # initialize parameters
-        self.beta2 = beta2
         self.epsilon = epsilon
+        self.beta2 = beta2
         self.diagonal_threshold = diagonal_threshold
         self.dtype = dtype
         self.num_updates = 0
@@ -281,9 +279,7 @@ class ShampooPreconditioner(Preconditioner):
                 num_params = dim
                 if self.idx is not None:
                     logger.info(
-                        f"Diagonal Preconditioner with Parameter {self.idx}, Order {k}, Dim {dim}, Number of Params {num_params}"
-                        + ", DType "
-                        + str(self.dtype)
+                        f"Diagonal Preconditioner with Parameter {self.idx}, Order {k}, Dim {num_params}, Number of Params {num_params}, DType {str(self.dtype)}"
                     )
             else:
                 preconditioner = torch.zeros((dim, dim), dtype=self.dtype, device=param.device)
@@ -292,9 +288,7 @@ class ShampooPreconditioner(Preconditioner):
                 num_params = dim**2
                 if self.idx is not None:
                     logger.info(
-                        f"Full Matrix Preconditioner with Parameter {self.idx}, Order {k}, Dim {dim}, Number of Params {num_params}"
-                        + ", DType "
-                        + str(self.dtype)
+                        f"Full Matrix Preconditioner with Parameter {self.idx}, Order {k}, Dim {dim}, Number of Params {num_params}, DType {str(self.dtype)}"
                     )
 
             self._parameter_count += num_params
@@ -356,12 +350,11 @@ class ShampooPreconditioner(Preconditioner):
                         alpha=1 - self.beta2,
                     )
 
-            # update preconditioners (full-matrix case)
             else:
 
+                contract_idx = [*range(k)] + [*range(k + 1, self.order)]
                 # Adagrad accumulation
                 if self.beta2 == 1.0:
-                    contract_idx = [*range(k)] + [*range(k + 1, self.order)]
                     preconditioner.add_(
                         torch.tensordot(
                             grad,
@@ -370,9 +363,7 @@ class ShampooPreconditioner(Preconditioner):
                         ).to(self.dtype)
                     )
 
-                # Exponential moving average
                 else:
-                    contract_idx = [*range(k)] + [*range(k + 1, self.order)]
                     preconditioner.mul_(self.beta2).add_(
                         torch.tensordot(
                             grad,
@@ -396,19 +387,18 @@ class ShampooPreconditioner(Preconditioner):
 
         # iterate over all dimensions
         for k, _ in enumerate(self.dims):
-            preconditioner = self.preconditioners[k]
             inv_preconditioner = self.inv_preconditioners[k]
-            preconditioner_type = self.preconditioner_types[k]
-
             # handle diagonal case while retaining dims
             if self.diagonal_threshold is not None:
 
+                preconditioner_type = self.preconditioner_types[k]
+
                 # precondition in diagonal case
                 if preconditioner_type == PreconditionerType.DIAGONAL:
+                    preconditioner = self.preconditioners[k]
                     denom = (preconditioner / self.bias_correction2).add_(self.epsilon)
                     preconditioned_grad.div_(denom.pow(-1 / (2 * self.order))[(None,) * k + (...,) + (None,) * (self.order - k - 1)])
 
-                # precondition in full-matrix case
                 else:
                     gradient_idx = [*range(1, self.order + 1)]
                     matrix_product_idx = deepcopy(gradient_idx)
@@ -421,7 +411,6 @@ class ShampooPreconditioner(Preconditioner):
                         matrix_product_idx,
                     )
 
-            # more efficient but transposes grad continually
             else:
                 preconditioned_grad = torch.tensordot(preconditioned_grad, inv_preconditioner, [[0], [0]])
 
@@ -436,11 +425,11 @@ class ShampooPreconditioner(Preconditioner):
 
         # iterate over all dimensions
         for k in range(self.order):
-            preconditioner = self.preconditioners[k]
             preconditioner_type = self.preconditioner_types[k]
 
             # check that this is a full matrix preconditioner
             if preconditioner_type == PreconditionerType.FULL:
+                preconditioner = self.preconditioners[k]
                 # add epsilon term and incorporate bias correction
                 bias_corrected_preconditioner = preconditioner / self.bias_correction2
 
@@ -555,7 +544,7 @@ class BlockShampooPreconditioner(Preconditioner):
         split_param = multi_dim_split(param, self.splits)
         for i, p in enumerate(split_param):
             self.split_sizes.append(torch.tensor(p.shape))
-            split_idx = str(idx) + "." + str(i)
+            split_idx = f"{str(idx)}.{str(i)}"
             preconditioner = ShampooPreconditioner(
                 p,
                 beta2=beta2,
@@ -617,7 +606,6 @@ class BlockShampooPreconditioner(Preconditioner):
 class Grafting(ABC):
     def __init__(self, param: Tensor):
         self._parameter_count = 0
-        pass
 
     def update_preconditioners(self, grad: Tensor):
         pass

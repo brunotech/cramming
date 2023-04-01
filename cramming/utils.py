@@ -87,11 +87,10 @@ def system_startup(cfg):
 
     if cfg.impl.no_jit_compilation:
         torch.jit._state.disable()
+    elif torch.cuda.is_available():
+        set_jit_instructions(cfg.impl.jit_instruction_type)
     else:
-        if torch.cuda.is_available():
-            set_jit_instructions(cfg.impl.jit_instruction_type)
-        else:
-            set_jit_instructions("default")
+        set_jit_instructions("default")
     multiprocess.set_start_method("forkserver")
     if cfg.impl.local_staging_dir is not None:
         tmp_path = os.path.join(cfg.impl.local_staging_dir, "tmp")
@@ -118,7 +117,6 @@ def system_startup(cfg):
         threads_per_gpu = min(torch.get_num_threads() // max(1, torch.cuda.device_count()), cfg.impl.threads)
         os.environ["OMP_NUM_THREADS"] = str(threads_per_gpu)
         local_rank = int(os.environ["LOCAL_RANK"])
-        cfg.impl.local_rank = local_rank
         torch.distributed.init_process_group(backend=cfg.impl.backend)
         global_rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -131,8 +129,7 @@ def system_startup(cfg):
     else:
         os.environ["OMP_NUM_THREADS"] = str(min(torch.get_num_threads(), cfg.impl.threads))
         global_rank = local_rank = 0
-        cfg.impl.local_rank = local_rank
-
+    cfg.impl.local_rank = local_rank
     # Construct setup dictionary:
     dtype = getattr(torch, cfg.impl.default_precision)  # :> dont mess this up
     device = torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else torch.device("cpu")
@@ -162,8 +159,11 @@ def is_main_process():
 
 
 def num_processes():
-    num_procs = 1 if not torch.distributed.is_initialized() else torch.distributed.get_world_size()
-    return num_procs
+    return (
+        torch.distributed.get_world_size()
+        if torch.distributed.is_initialized()
+        else 1
+    )
 
 
 def find_pretrained_checkpoint(cfg, downstream_classes=None):
@@ -171,12 +171,12 @@ def find_pretrained_checkpoint(cfg, downstream_classes=None):
     local_checkpoint_folder = os.path.join(cfg.base_dir, cfg.name, "checkpoints")
     if cfg.eval.checkpoint == "latest":
         # Load the latest local checkpoint
-        all_checkpoints = [f for f in os.listdir(local_checkpoint_folder)]
+        all_checkpoints = list(os.listdir(local_checkpoint_folder))
         checkpoint_paths = [os.path.join(local_checkpoint_folder, c) for c in all_checkpoints]
         checkpoint_name = max(checkpoint_paths, key=os.path.getmtime)
     elif cfg.eval.checkpoint == "smallest":
         # Load maybe the local checkpoint with smallest loss
-        all_checkpoints = [f for f in os.listdir(local_checkpoint_folder)]
+        all_checkpoints = list(os.listdir(local_checkpoint_folder))
         checkpoint_paths = [os.path.join(local_checkpoint_folder, c) for c in all_checkpoints]
         checkpoint_losses = [float(path[-5:]) for path in checkpoint_paths]
         checkpoint_name = checkpoint_paths[np.argmin(checkpoint_losses)]
@@ -221,7 +221,7 @@ def save_summary(table_name, cfg, metrics, stats, local_time, setup, original_cw
     """Save two summary tables. A detailed table of iterations/loss+acc and a summary of the end results."""
     # 1) detailed table:
     for step in range(len(stats["loss"])):
-        iteration = dict()
+        iteration = {}
         for key in stats:
             iteration[key] = stats[key][step] if step < len(stats[key]) else None
         save_to_table(".", f"{cfg.name}_convergence_results", dryrun=cfg.dryrun, **iteration)
@@ -257,23 +257,31 @@ def save_summary(table_name, cfg, metrics, stats, local_time, setup, original_cw
             loss=_maybe_record("loss"),
             final_step=_maybe_record("step"),
             final_epoch=_maybe_record("epoch"),
-            step_time=np.mean(stats["train_time"]) if len(stats["train_time"]) > 0 else "",
-            loss100k=_maybe_record("loss", step=100_000 // cfg.impl.print_loss_every_nth_step),
-            loss200k=_maybe_record("loss", step=200_000 // cfg.impl.print_loss_every_nth_step),
-            loss300k=_maybe_record("loss", step=300_000 // cfg.impl.print_loss_every_nth_step),
-            **{k: v for k, v in metrics.items()},
-            total_time=str(datetime.timedelta(seconds=local_time)).replace(",", ""),
+            step_time=np.mean(stats["train_time"])
+            if len(stats["train_time"]) > 0
+            else "",
+            loss100k=_maybe_record(
+                "loss", step=100_000 // cfg.impl.print_loss_every_nth_step
+            ),
+            loss200k=_maybe_record(
+                "loss", step=200_000 // cfg.impl.print_loss_every_nth_step
+            ),
+            loss300k=_maybe_record(
+                "loss", step=300_000 // cfg.impl.print_loss_every_nth_step
+            ),
+            **dict(metrics.items()),
+            total_time=str(datetime.timedelta(seconds=local_time)).replace(
+                ",", ""
+            ),
             batch_size=cfg.train.batch_size,
             lr=cfg.train.optim.lr,
             warmup=cfg.train.warmup_steps,
             steps=cfg.train.steps,
-            # System settings:
             seed=cfg.seed,
             dataset_hash=processed_dataset_dir.split("_")[-1],
             base_dir=cfg.base_dir,
             impl_path=cfg.impl.path,
             local_folder=local_folder,
-            # # Dump configs from here on:
             **{f"Data_{k}": v for k, v in cfg.data.items()},
             **{f"Arch_{k}": v for k, v in cfg.arch.items()},
             **{f"Train_{k}": v for k, v in cfg.train.items()},
@@ -286,18 +294,20 @@ def save_summary(table_name, cfg, metrics, stats, local_time, setup, original_cw
             loss=_maybe_record("loss"),
             avg_loss=_maybe_record("avg_loss"),
             final_epoch=_maybe_record("epoch"),
-            step_time=np.mean(stats["train_time"]) if len(stats["train_time"]) > 0 else "",
-            **{k: v for k, v in metrics.items()},
-            total_time=str(datetime.timedelta(seconds=local_time)).replace(",", ""),
+            step_time=np.mean(stats["train_time"])
+            if len(stats["train_time"]) > 0
+            else "",
+            **dict(metrics.items()),
+            total_time=str(datetime.timedelta(seconds=local_time)).replace(
+                ",", ""
+            ),
             batch_size=cfg.eval.batch_size,
             lr=cfg.eval.optim.lr,
             warmup=cfg.eval.warmup_steps,
-            # System settings:
             seed=cfg.seed,
             base_dir=cfg.base_dir,
             impl_path=cfg.impl.path,
             local_folder=local_folder,
-            # # Dump configs from here on:
             **{f"Eval_{k}": v for k, v in cfg.eval.items()},
         )
     location = os.path.join(cfg.original_cwd, "tables") if original_cwd else "tables"
@@ -325,17 +335,12 @@ def save_to_table(out_dir, table_name, dryrun, **kwargs):
             with open(fname, "w") as f:
                 writer = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
                 writer.writeheader()
-        else:
-            pass
-
     # Write a new row
     if not dryrun:
         # Add row for this experiment
         with open(fname, "a") as f:
             writer = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
             writer.writerow(kwargs)
-    else:
-        pass
 
 
 def set_random_seed(seed=233):
@@ -360,7 +365,20 @@ def set_deterministic():
 def set_jit_instructions(type="nvfuser"):
     """Refer also https://github.com/pytorch/pytorch/blob/c90be037b46f58d2b120f46a1c466976f66817b5/torch/jit/_fuser.py#L20"""
     # torch._C._set_graph_executor_optimize(True)
-    if type == "nvfuser":
+    if type == "legacy":
+        # via https://github.com/tunib-ai/oslo/blob/master/oslo/torch/jit/_utils.py
+        # legacy pytorch fuser
+        torch._C._jit_set_profiling_mode(False)
+        torch._C._jit_set_profiling_executor(False)
+        torch._C._jit_override_can_fuse_on_cpu(True)
+        torch._C._jit_override_can_fuse_on_gpu(True)
+    elif type == "nnc":
+        # via https://github.com/tunib-ai/oslo/blob/master/oslo/torch/jit/_utils.py
+        torch._C._jit_set_nvfuser_enabled(False)
+        torch._C._jit_set_texpr_fuser_enabled(True)
+        torch._C._jit_override_can_fuse_on_cpu(False)
+        torch._C._jit_override_can_fuse_on_gpu(False)
+    elif type == "nvfuser":
         # from BERT nvidia example
         torch._C._jit_set_nvfuser_enabled(True)
         torch._C._jit_set_texpr_fuser_enabled(False)
@@ -376,23 +394,6 @@ def set_jit_instructions(type="nvfuser"):
         torch._C._jit_override_can_fuse_on_cpu(False)
         torch._C._jit_override_can_fuse_on_gpu(False)
         torch._C._jit_set_fusion_strategy([("STATIC", 20), ("DYNAMIC", 20)])  # maybe this is overkill
-        # torch._C._debug_set_autodiff_subgraph_inlining(False)
-    elif type == "nnc":
-        # via https://github.com/tunib-ai/oslo/blob/master/oslo/torch/jit/_utils.py
-        torch._C._jit_set_nvfuser_enabled(False)
-        torch._C._jit_set_texpr_fuser_enabled(True)
-        torch._C._jit_override_can_fuse_on_cpu(False)
-        torch._C._jit_override_can_fuse_on_gpu(False)
-    elif type == "legacy":
-        # via https://github.com/tunib-ai/oslo/blob/master/oslo/torch/jit/_utils.py
-        # legacy pytorch fuser
-        torch._C._jit_set_profiling_mode(False)
-        torch._C._jit_set_profiling_executor(False)
-        torch._C._jit_override_can_fuse_on_cpu(True)
-        torch._C._jit_override_can_fuse_on_gpu(True)
-    else:
-        # default options
-        pass
 
 
 def avg_n_dicts(dicts):
@@ -403,10 +404,7 @@ def avg_n_dicts(dicts):
     for dic in dicts:
         for key in dic:
             if key not in means:
-                if isinstance(dic[key], list):
-                    means[key] = [0 for entry in dic[key]]
-                else:
-                    means[key] = 0
+                means[key] = [0 for _ in dic[key]] if isinstance(dic[key], list) else 0
             if isinstance(dic[key], list):
                 for idx, entry in enumerate(dic[key]):
                     means[key][idx] += entry / len(dicts)
@@ -419,7 +417,7 @@ def dump_metrics(cfg, metrics):
     """Simple yaml dump of metric values."""
 
     filepath = f"metrics_{cfg.name}.yaml"
-    sanitized_metrics = dict()
+    sanitized_metrics = {}
     for metric, val in metrics.items():
         try:
             sanitized_metrics[metric] = np.asarray(val).item()
@@ -450,11 +448,10 @@ def _initialize_wandb(setup, cfg):
 
 
 def wandb_log(stats, cfg):
-    if cfg.wandb.enabled:
-        if is_main_process():
-            import wandb
+    if cfg.wandb.enabled and is_main_process():
+        import wandb
 
-            wandb.log({k: v[-1] for k, v in stats.items()}, step=stats["step"][-1] if "step" in stats else None)
+        wandb.log({k: v[-1] for k, v in stats.items()}, step=stats["step"][-1] if "step" in stats else None)
 
 
 def flatten(d, parent_key="", sep="_"):

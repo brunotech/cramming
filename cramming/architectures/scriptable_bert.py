@@ -20,11 +20,13 @@ def construct_scriptable_bert(cfg_arch, vocab_size, downstream_classes=None):
     """See the config file for details on what is possible."""
     cfg_arch.embedding.vocab_size = vocab_size
     cfg_arch.num_labels = downstream_classes
-    if downstream_classes is None:
-        model = ScriptableLMForPreTraining(ScriptableLM(cfg_arch), cfg_arch)
-    else:
-        model = ScriptableLMForSequenceClassification(ScriptableLM(cfg_arch), cfg_arch)
-    return model
+    return (
+        ScriptableLMForPreTraining(ScriptableLM(cfg_arch), cfg_arch)
+        if downstream_classes is None
+        else ScriptableLMForSequenceClassification(
+            ScriptableLM(cfg_arch), cfg_arch
+        )
+    )
 
 
 class ScriptableLM(torch.nn.Module):
@@ -73,17 +75,16 @@ class ScriptableLM(torch.nn.Module):
         if self.gradient_checkpointing and self.training:
             # Hide this away from any jit-ing...
             hidden_states = self.forward_checkpointed(hidden_states, attention_mask)
+        elif self.layer_drop_theta is None:
+            for layer_module in self.layers:
+                hidden_states = layer_module(hidden_states, attention_mask, self.p)
         else:
-            if self.layer_drop_theta is None:
-                for i, layer_module in enumerate(self.layers):
-                    hidden_states = layer_module(hidden_states, attention_mask, self.p)
-            else:
-                p = self.p.clone()
-                step = (1 - self.layer_drop_theta) / len(self.layers)
-                for i, layer_module in enumerate(self.layers):
-                    p = p - step
-                    if torch.bernoulli(p):
-                        hidden_states = layer_module(hidden_states, attention_mask, res_scale=1 / p)
+            p = self.p.clone()
+            step = (1 - self.layer_drop_theta) / len(self.layers)
+            for layer_module in self.layers:
+                p = p - step
+                if torch.bernoulli(p):
+                    hidden_states = layer_module(hidden_states, attention_mask, res_scale=1 / p)
         if self.seq_first:
             hidden_states = hidden_states.transpose(0, 1).contiguous()
 
@@ -92,12 +93,12 @@ class ScriptableLM(torch.nn.Module):
     @torch.jit.ignore
     def forward_checkpointed(self, hidden_states, attention_mask: Optional[torch.Tensor] = None):
         if self.layer_drop_theta is None:
-            for i, layer_module in enumerate(self.layers):
+            for layer_module in self.layers:
                 hidden_states = torch.utils.checkpoint.checkpoint(layer_module, hidden_states, attention_mask)
         else:
             p = self.p.clone()
             step = (1 - self.layer_drop_theta) / len(self.layers)
-            for i, layer_module in enumerate(self.layers):
+            for layer_module in self.layers:
                 p = p - step
                 if torch.bernoulli(p):
                     hidden_states = torch.utils.checkpoint.checkpoint(layer_module, hidden_states, attention_mask, res_scale=1 / p)
@@ -112,23 +113,22 @@ class ScriptableLMForPreTraining(torch.nn.Module):
         self.cfg = cfg_arch
 
         self.encoder = encoder
-        if not cfg_arch.skip_head_transform:
-            self.prediction_head = PredictionHeadComponent(cfg_arch)
-        else:
-            self.prediction_head = torch.nn.Linear(
+        self.prediction_head = (
+            torch.nn.Linear(
                 cfg_arch.hidden_size,
                 cfg_arch.embedding.embedding_dim,
                 bias=cfg_arch.use_bias,
             )
-
+            if cfg_arch.skip_head_transform
+            else PredictionHeadComponent(cfg_arch)
+        )
         if cfg_arch.loss == "szegedy":
             self.decoder = torch.nn.Identity()
+        elif self.cfg.tie_weights:
+            self.decoder = torch.nn.Linear(cfg_arch.embedding.embedding_dim, cfg_arch.embedding.vocab_size, bias=cfg_arch.decoder_bias)
+            self.decoder.weight = self.encoder.embedding.word_embedding.weight
         else:
-            if self.cfg.tie_weights:
-                self.decoder = torch.nn.Linear(cfg_arch.embedding.embedding_dim, cfg_arch.embedding.vocab_size, bias=cfg_arch.decoder_bias)
-                self.decoder.weight = self.encoder.embedding.word_embedding.weight
-            else:
-                self.decoder = torch.nn.Linear(cfg_arch.hidden_size, cfg_arch.embedding.vocab_size, bias=cfg_arch.decoder_bias)
+            self.decoder = torch.nn.Linear(cfg_arch.hidden_size, cfg_arch.embedding.vocab_size, bias=cfg_arch.decoder_bias)
 
         self.loss_fn = _get_loss_fn(cfg_arch.loss, z_loss_factor=cfg_arch.z_loss_factor, embedding=self.encoder.embedding.word_embedding)
         self.sparse_prediction = self.cfg.sparse_prediction
@@ -171,11 +171,11 @@ class ScriptableLMForPreTraining(torch.nn.Module):
             labels = labels[mask_positions]
 
         outputs = self.decoder(self.prediction_head(outputs))
-        if labels is not None:
-            masked_lm_loss = self.loss_fn(outputs, labels)
-        else:
-            masked_lm_loss = outputs.new_zeros((1,))
-        return masked_lm_loss
+        return (
+            self.loss_fn(outputs, labels)
+            if labels is not None
+            else outputs.new_zeros((1,))
+        )
 
 
 class ScriptableLMForSequenceClassification(torch.nn.Module):
@@ -209,7 +209,10 @@ class ScriptableLMForSequenceClassification(torch.nn.Module):
             if self.problem_type is None:  # very much from huggingface
                 if self.cfg.num_labels == 1:
                     self.problem_type = "regression"
-                elif self.cfg.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                elif self.cfg.num_labels > 1 and labels.dtype in [
+                    torch.long,
+                    torch.int,
+                ]:
                     self.problem_type = "single_label_classification"
                 else:
                     self.problem_type = "multi_label_classification"
@@ -234,20 +237,11 @@ class ScriptableLMForSequenceClassification(torch.nn.Module):
 
 def _get_loss_fn(loss_fn_name, z_loss_factor=0.0, embedding=torch.nn.Identity()):
     if loss_fn_name == "cross-entropy":
-        if z_loss_factor > 0:
-            from .losses import CrossEntropyWithZLoss
-
-            return torch.jit.script(CrossEntropyWithZLoss(z_loss_factor=z_loss_factor))
-        else:
+        if z_loss_factor <= 0:
             return torch.nn.CrossEntropyLoss()
-    # elif loss_fn_name == "adaptive-cross-entropy":
-    #     loss_fn = torch.nn.AdaptiveLogSoftmaxWithLoss(
-    #         in_features,
-    #         n_classes,
-    #         cutoffs,
-    #         div_value=4.0,
-    #         head_bias=False,
-    #     )
+        from .losses import CrossEntropyWithZLoss
+
+        return torch.jit.script(CrossEntropyWithZLoss(z_loss_factor=z_loss_factor))
     elif loss_fn_name == "MSE":
         assert z_loss_factor == 0
         from .losses import MSELoss

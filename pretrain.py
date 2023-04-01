@@ -78,7 +78,7 @@ def main_training_process(cfg, setup):
 
     if cramming.utils.is_main_process():
         # Save to summary:
-        metrics = dict(num_params=sum([p.numel() for p in model.parameters()]))
+        metrics = dict(num_params=sum(p.numel() for p in model.parameters()))
         cramming.utils.save_summary("pretrain", cfg, metrics, stats, time.time() - local_time, setup)
         # Save final checkpoint:
         now = datetime.datetime.now()
@@ -89,14 +89,14 @@ def main_training_process(cfg, setup):
 def check_deadline(launch_time, hour_limit):
     """These measurements are deliberately wall-clock based."""
     current_time = time.time()
-    return True if (current_time - launch_time) / 3600 > hour_limit else False
+    return (current_time - launch_time) / 3600 > hour_limit
 
 
 def check_early_termination(launch_time, loss, early_termination):
     """Early termination based on terrible loss."""
     if early_termination.enabled and loss > early_termination.loss_threshold:
         current_time = time.time()
-        return True if (current_time - launch_time) / 3600 > early_termination.budget else False
+        return (current_time - launch_time) / 3600 > early_termination.budget
     else:
         return False
 
@@ -137,15 +137,11 @@ def collect_stats(step, loss_vals, train_time, stats, model_engine, dataloader, 
 
 def flag_communication(training_allowed):
     """A quick and dirty communication through NCCL. Should not be a major burden."""
-    if torch.distributed.is_initialized():
-        comm_tensor = torch.as_tensor(training_allowed).cuda()
-        torch.distributed.all_reduce(comm_tensor, torch.distributed.ReduceOp.MIN, async_op=False)
-        if comm_tensor >= 1:
-            return True
-        else:
-            return False
-    else:
+    if not torch.distributed.is_initialized():
         return training_allowed
+    comm_tensor = torch.as_tensor(training_allowed).cuda()
+    torch.distributed.all_reduce(comm_tensor, torch.distributed.ReduceOp.MIN, async_op=False)
+    return comm_tensor >= 1
 
 
 @hydra.main(config_path="cramming/config", config_name="cfg_pretrain", version_base="1.1")

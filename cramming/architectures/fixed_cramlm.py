@@ -20,11 +20,13 @@ def construct_fixed_cramlm(cfg_arch, vocab_size, downstream_classes=None):
     """See the config file for details on what is possible."""
     cfg_arch.embedding.vocab_size = vocab_size
     cfg_arch.num_labels = downstream_classes
-    if downstream_classes is None:
-        model = ScriptableLMForPreTraining(ScriptableLM(cfg_arch), cfg_arch)
-    else:
-        model = ScriptableLMForSequenceClassification(ScriptableLM(cfg_arch), cfg_arch)
-    return model
+    return (
+        ScriptableLMForPreTraining(ScriptableLM(cfg_arch), cfg_arch)
+        if downstream_classes is None
+        else ScriptableLMForSequenceClassification(
+            ScriptableLM(cfg_arch), cfg_arch
+        )
+    )
 
 
 class TransformerLayer(torch.nn.Module):
@@ -73,7 +75,7 @@ class ScriptableLM(torch.nn.Module):
         hidden_states = self.embedding(input_ids)
         hidden_states = hidden_states.transpose(0, 1).contiguous()
 
-        for i, layer_module in enumerate(self.layers):
+        for layer_module in self.layers:
             hidden_states = layer_module(hidden_states, attention_mask)
 
         hidden_states = hidden_states.transpose(0, 1).contiguous()
@@ -135,11 +137,11 @@ class ScriptableLMForPreTraining(torch.nn.Module):
             labels = labels[mask_positions]
 
         outputs = self.decoder(self.prediction_head(outputs))
-        if labels is not None:
-            masked_lm_loss = self.loss_fn(outputs, labels)
-        else:
-            masked_lm_loss = outputs.new_zeros((1,))
-        return masked_lm_loss
+        return (
+            self.loss_fn(outputs, labels)
+            if labels is not None
+            else outputs.new_zeros((1,))
+        )
 
 
 class ScriptableLMForSequenceClassification(torch.nn.Module):
@@ -173,7 +175,10 @@ class ScriptableLMForSequenceClassification(torch.nn.Module):
             if self.problem_type is None:  # very much from huggingface
                 if self.cfg.num_labels == 1:
                     self.problem_type = "regression"
-                elif self.cfg.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                elif self.cfg.num_labels > 1 and labels.dtype in [
+                    torch.long,
+                    torch.int,
+                ]:
                     self.problem_type = "single_label_classification"
                 else:
                     self.problem_type = "multi_label_classification"

@@ -34,7 +34,7 @@ class LMDBDataset(torch.utils.data.Dataset):
         self.seq_length = cfg_data.seq_length
         self.dataset_keys = list(dataset[0].keys())
         seq_lengths = [len(dataset[0][k]) for k in self.dataset_keys]
-        assert all([length == seq_lengths[0] for length in seq_lengths])
+        assert all(length == seq_lengths[0] for length in seq_lengths)
 
         self.target_dtype = lookup_dtype(cfg_data.vocab_size)
 
@@ -42,10 +42,9 @@ class LMDBDataset(torch.utils.data.Dataset):
         full_name = name + shuffled
         self.path = os.path.join(os.path.expanduser(path), f"{full_name}.lmdb")
 
-        if cfg_db.rebuild_existing_database:
-            if os.path.isfile(self.path):
-                os.remove(self.path)
-                os.remove(self.path + "-lock")
+        if cfg_db.rebuild_existing_database and os.path.isfile(self.path):
+            os.remove(self.path)
+            os.remove(f"{self.path}-lock")
 
         # Load or create database
         if os.path.isfile(self.path):
@@ -126,7 +125,7 @@ class LMDBDataset(torch.utils.data.Dataset):
         Future: Write this class as a proper https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset
         """
         if self.access == "cursor":
-            index_key = "{}".format(index).encode("ascii")
+            index_key = f"{index}".encode("ascii")
             if index_key != self.cursor.key():
                 self.cursor.set_key(index_key)
 
@@ -140,8 +139,12 @@ class LMDBDataset(torch.utils.data.Dataset):
         # crime, but ok - we just disabled the warning...:
         # Tested this and the LMDB cannot be corrupted this way, even though byteflow is technically non-writeable
         data_block = torch.frombuffer(byteflow, dtype=self.target_dtype, count=self.seq_length * len(self.dataset_keys))
-        sample_dict = dict(zip(self.dataset_keys, torch.chunk(data_block, chunks=len(self.dataset_keys), dim=-1)))
-        return sample_dict
+        return dict(
+            zip(
+                self.dataset_keys,
+                torch.chunk(data_block, chunks=len(self.dataset_keys), dim=-1),
+            )
+        )
 
 
 def create_database(dataset, database_path, cfg_data, cfg_db, target_dtype):
@@ -170,13 +173,13 @@ def create_database(dataset, database_path, cfg_data, cfg_db, target_dtype):
     if cfg_db.shuffle_while_writing:
         order = torch.randperm(len(dataset)).tolist()  # this might be a problem for larger dataset sizes?
     else:
-        order = range(0, len(dataset))
+        order = range(len(dataset))
     for indexing in order:
         data = dataset[indexing]
         # serialize super serially, super slow
         data_block = torch.cat([torch.as_tensor(item, dtype=target_dtype) for item in data.values()], dim=0)
         byteflow = data_block.numpy().tobytes()
-        txn.put("{}".format(idx).encode("ascii"), byteflow)
+        txn.put(f"{idx}".encode("ascii"), byteflow)
         idx += 1
 
         if idx % cfg_db.write_frequency == 0:
@@ -186,7 +189,7 @@ def create_database(dataset, database_path, cfg_data, cfg_db, target_dtype):
 
     # finalize dataset
     txn.commit()
-    keys = ["{}".format(k).encode("ascii") for k in range(idx)]  # How large will these keys be, too large?
+    keys = [f"{k}".encode("ascii") for k in range(idx)]
     with db.begin(write=True) as txn:
         txn.put(b"__keys__", pickle.dumps(keys))
         txn.put(b"__len__", pickle.dumps(len(keys)))

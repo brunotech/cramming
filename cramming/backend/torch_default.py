@@ -71,8 +71,16 @@ class TorchEngine(torch.nn.Module):
         # Optional sequence curriculum:
         self.sequence_curriculum = "sequence_curriculum" in cfg_train
         self.data_seq_length = seq_length
-        self.current_seq_length = seq_length if not self.sequence_curriculum else cfg_train.sequence_curriculum.lengths[0]
-        self.sequence_unfold = None if not self.sequence_curriculum else cfg_train.sequence_curriculum.unfold
+        self.current_seq_length = (
+            cfg_train.sequence_curriculum.lengths[0]
+            if self.sequence_curriculum
+            else seq_length
+        )
+        self.sequence_unfold = (
+            cfg_train.sequence_curriculum.unfold
+            if self.sequence_curriculum
+            else None
+        )
 
         # Optional EMA/LAWA-type weight averages
         if "weight_averaging" in cfg_train:
@@ -181,15 +189,12 @@ class TorchEngine(torch.nn.Module):
 
     def record_tokens_per_step(self):
         """Tokens in each microbatch step."""
-        if not self.sequence_curriculum:
-            return self.current_seq_length * self.cfg_impl.microbatch_size
+        if self.sequence_curriculum and self.sequence_unfold:
+            # Same number of tokens in this case:
+            return self.current_seq_length * (self.data_seq_length // self.current_seq_length) * self.cfg_impl.microbatch_size
         else:
-            if self.sequence_unfold:
-                # Same number of tokens in this case:
-                return self.current_seq_length * (self.data_seq_length // self.current_seq_length) * self.cfg_impl.microbatch_size
-            else:
-                # Reduced number of tokens here:
-                return self.current_seq_length * self.cfg_impl.microbatch_size
+            # Reduced number of tokens here:
+            return self.current_seq_length * self.cfg_impl.microbatch_size
 
     def schedule_batch_size(self):
         """Optionally implement linear batch size ramp-ups."""
@@ -226,16 +231,18 @@ class TorchEngine(torch.nn.Module):
                     self.current_seq_length = length
 
     def moving_average_computation(self):
-        if self.weight_averaging_frequency > 0:
-            if (self.steps % self.weight_averaging_frequency) == 0:
-                params = [p.detach().cpu() for p in self.model.parameters()]
-                buffers = [b.detach().cpu() for b in self.model.buffers()]
-                if self.weight_averaging.type == "EMA":
-                    update_ema(params, self.param_store, buffers, self.buffer_store, momentum=self.weight_averaging.momentum)
-                else:  # latest weight averaging
-                    self.param_store, self.buffer_store = updated_latest_weight_average(
-                        params, buffers, self.store, last_k=self.weight_averaging.last_k
-                    )
+        if (
+            self.weight_averaging_frequency > 0
+            and (self.steps % self.weight_averaging_frequency) == 0
+        ):
+            params = [p.detach().cpu() for p in self.model.parameters()]
+            buffers = [b.detach().cpu() for b in self.model.buffers()]
+            if self.weight_averaging.type == "EMA":
+                update_ema(params, self.param_store, buffers, self.buffer_store, momentum=self.weight_averaging.momentum)
+            else:  # latest weight averaging
+                self.param_store, self.buffer_store = updated_latest_weight_average(
+                    params, buffers, self.store, last_k=self.weight_averaging.last_k
+                )
 
     @torch.no_grad()
     def retrieve_model_state_dict(self):
@@ -245,10 +252,7 @@ class TorchEngine(torch.nn.Module):
                 param.copy_(param_ma.data)
             for buffer, buffer_ma in zip(self.model.buffers(), self.buffer_store):
                 buffer.copy_(buffer_ma.data)
-            return self.model.state_dict()
-        else:
-            # Else use normal state dict
-            return self.model.state_dict()
+        return self.model.state_dict()
 
     def _init_distributed(self, model):
         model = torch.nn.parallel.DistributedDataParallel(
@@ -285,26 +289,25 @@ class TorchEngine(torch.nn.Module):
                 self.model = self.model.from_pretrained(file.split("hf://")[1], config=cfg_arch).to(**self.setup)
                 # reinit optimizer:
                 self.optimizer, self.scheduler = _load_optimizer(self.model, self.cfg_train, self.cfg_impl)
+        elif not skip_optim_state:
+            optim_state, model_state, scheduler_state, _ = torch.load(file, map_location=self.setup["device"])
+            self.model.load_state_dict(model_state).to(**self.setup)
+            self.optimizer.load_state_dict(optim_state)
+            self.scheduler.load_state_dict(scheduler_state)
         else:
-            if not skip_optim_state:
-                optim_state, model_state, scheduler_state, _ = torch.load(file, map_location=self.setup["device"])
-                self.model.load_state_dict(model_state).to(**self.setup)
-                self.optimizer.load_state_dict(optim_state)
-                self.scheduler.load_state_dict(scheduler_state)
-            else:
 
-                model_state = torch.load(file, map_location=self.setup["device"])
-                try:
-                    sanitized_state = {}
-                    for k, v in model_state.items():
-                        if k.startswith("module."):
-                            k = k[7:]
-                        sanitized_state[k] = v
-                    self.model.load_state_dict(sanitized_state, strict=True)
-                except RuntimeError as e:
-                    log.info(f"State dict difference is {str(e).split('Error(s) in loading state_dict for')[1]}... Ok?")
-                    self.model.load_state_dict(sanitized_state, strict=False)
-                self.model.to(**self.setup)
+            model_state = torch.load(file, map_location=self.setup["device"])
+            try:
+                sanitized_state = {}
+                for k, v in model_state.items():
+                    if k.startswith("module."):
+                        k = k[7:]
+                    sanitized_state[k] = v
+                self.model.load_state_dict(sanitized_state, strict=True)
+            except RuntimeError as e:
+                log.info(f"State dict difference is {str(e).split('Error(s) in loading state_dict for')[1]}... Ok?")
+                self.model.load_state_dict(sanitized_state, strict=False)
+            self.model.to(**self.setup)
 
     def save_training_checkpoint(self, identifier, directory="checkpoints", state=None):
         """Path, identifier and additional client state. This checkpoint can be used to resume training.
@@ -351,17 +354,17 @@ class TorchEngine(torch.nn.Module):
 
         fmodel, params, buffers = functorch.make_functional_with_buffers(self.model)
 
-        scales = [torch.tensor(1.0, **self.setup, requires_grad=True) for p in params]  # Modify all params by default
+        scales = [torch.tensor(1.0, **self.setup, requires_grad=True) for _ in params]
         # Prepare for functional optimizer:
 
-        exp_avgs = [torch.tensor(0.0, **self.setup) for s in scales]
-        exp_avg_sqs = [torch.tensor(0.0, **self.setup) for s in scales]
-        state_steps = [torch.tensor(0.0, **self.setup) for s in scales]
+        exp_avgs = [torch.tensor(0.0, **self.setup) for _ in scales]
+        exp_avg_sqs = [torch.tensor(0.0, **self.setup) for _ in scales]
+        state_steps = [torch.tensor(0.0, **self.setup) for _ in scales]
 
         adam_fn = partial(torch.optim._functional.adam, amsgrad=False, beta1=0.9, beta2=0.98, weight_decay=0, eps=1e-6, maximize=False)
 
         eta = optim_cfg.lr
-        for step in range(gradinit_cfg.steps):
+        for _ in range(gradinit_cfg.steps):
             # scale params
             scaled_params = [p * s for p, s in zip(params, scales)]
             # ## Compute first step ##
@@ -391,8 +394,6 @@ class TorchEngine(torch.nn.Module):
                 # Project onto constraints and detach
                 scales = [s.clamp_(min=gradinit_cfg.min_scale, max=gradinit_cfg.max_scale) for s in scales]
             log.info(f"Gradinit: Loss0: {loss0:2.4f}. Loss1: {loss1:2.4f}. Grad Norm: {gnorm:2.4f}.")
-            # print([f"{name}:{s.item():2.4f}" for (name, _), s in zip(self.model.named_parameters(), scales)])
-
         # Finally copy scales into the existing model
         with torch.no_grad():
             for param, scale in zip(self.model.parameters(), scales):
@@ -452,9 +453,7 @@ def _load_optimizer(model, cfg_train, cfg_impl):
         optimizer_to_schedule = optimizer
     else:
         optim_params = {k: v for k, v in cfg_train.optim_mod.items() if k != "name"}
-        if cfg_train.optim_mod.name == "LARS":
-            optimizer = LARS(optimizer, **optim_params)
-        elif cfg_train.optim_mod.name == "LARC":
+        if cfg_train.optim_mod.name in ["LARS", "LARC"]:
             optimizer = LARS(optimizer, **optim_params)
         elif cfg_train.optim_mod.name == "SAM":
             optimizer = SAM(optimizer, **optim_params)

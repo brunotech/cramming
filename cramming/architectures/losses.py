@@ -167,10 +167,7 @@ class FocalLoss(torch.nn.Module):
 
         log_probs = torch.nn.functional.log_softmax(input[valid_mask]).gather(1, target[None, valid_mask])
         loss = -1 * (1 - log_probs.exp()) ** self.gamma * log_probs
-        if self.size_average:
-            return loss.mean()
-        else:
-            return loss.sum()
+        return loss.mean() if self.size_average else loss.sum()
 
 
 class IncorrectCrossEntropyLoss(torch.nn.CrossEntropyLoss):

@@ -122,9 +122,9 @@ class Shampoo(Optimizer):
 
         for group in self.param_groups:
             for p in group["params"]:
-                state = self.state[p]
                 beta1, _ = group["betas"]
                 if beta1 != 0:
+                    state = self.state[p]
                     state["exp_avg"] = None
 
         self._initialize_preconditioners()
@@ -165,7 +165,6 @@ class Shampoo(Optimizer):
                             grafting_epsilon=self.grafting_epsilon,
                         )
 
-                # Uses diagonal preconditioners if larger than threshold
                 elif self.large_dim_method == LargeDimMethod.DIAGONAL:
                     state["preconditioners"] = ShampooPreconditioner(
                         p,
@@ -181,7 +180,6 @@ class Shampoo(Optimizer):
                         grafting_epsilon=self.grafting_epsilon,
                     )
 
-                # Uses blocking if larger than threshold
                 elif self.large_dim_method == LargeDimMethod.BLOCKING:
                     state["preconditioners"] = BlockShampooPreconditioner(
                         p,
@@ -199,7 +197,9 @@ class Shampoo(Optimizer):
                     )
 
                 else:
-                    raise ValueError("Large dim method " + self.large_dim_method + " is not implemented!")
+                    raise ValueError(
+                        f"Large dim method {self.large_dim_method} is not implemented!"
+                    )
 
                 # increase parameter count
                 self.parameter_count += state["preconditioners"].parameter_count
@@ -269,21 +269,18 @@ class Shampoo(Optimizer):
                 if p.grad is None:
                     continue
 
-                grad = p.grad
-                state = self.state[p]
-                weight_decay = group["weight_decay"]
-
-                # TODO: Sparse case still not supported.
                 if p.grad.is_sparse:
                     raise Exception("Sparse parameters are not currently supported by Shampoo.")
 
-                # Dense case
-                else:
-                    # incorporate L2 regularization / weight decay
-                    if not self.adam_w_mode and weight_decay != 0:
-                        grad.add_(p, alpha=weight_decay)
+                grad = p.grad
+                weight_decay = group["weight_decay"]
 
-                    state["preconditioners"].update_preconditioners(grad)
+                # incorporate L2 regularization / weight decay
+                if not self.adam_w_mode and weight_decay != 0:
+                    grad.add_(p, alpha=weight_decay)
+
+                state = self.state[p]
+                state["preconditioners"].update_preconditioners(grad)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -320,35 +317,31 @@ class Shampoo(Optimizer):
                 grad = p.grad
                 state = self.state[p]
                 beta1, _ = group["betas"]
-                weight_decay = group["weight_decay"]
-                lr = group["lr"]
-
-                # TODO: Sparse case still not supported.
                 if p.grad.is_sparse:
                     raise Exception("Sparse parameters are not currently supported by Shampoo.")
 
-                # Dense case
-                else:
+                # incorporate momentum
+                if beta1 != 0:
+                    # compute bias corrections if necessary
+                    bias_correction1 = 1.0
+                    if self.use_bias_correction and beta1 < 1:
+                        bias_correction1 -= beta1**self.iter
 
-                    # incorporate momentum
-                    if beta1 != 0:
-                        # compute bias corrections if necessary
-                        bias_correction1 = 1.0
-                        if self.use_bias_correction and beta1 < 1:
-                            bias_correction1 -= beta1**self.iter
+                    # modify grad with momentum term
+                    if state["exp_avg"] is None:
+                        state["exp_avg"] = torch.zeros_like(grad, memory_format=torch.preserve_format)
+                    buf = state["exp_avg"]
+                    buf.mul_(beta1).add_(grad, alpha=1 - beta1)
+                    grad.copy_(buf / bias_correction1)
 
-                        # modify grad with momentum term
-                        if state["exp_avg"] is None:
-                            state["exp_avg"] = torch.zeros_like(grad, memory_format=torch.preserve_format)
-                        buf = state["exp_avg"]
-                        buf.mul_(beta1).add_(grad, alpha=1 - beta1)
-                        grad.copy_(buf / bias_correction1)
+                weight_decay = group["weight_decay"]
+                lr = group["lr"]
 
-                    # perform AdamW weight decay
-                    if self.adam_w_mode and weight_decay != 0:
-                        p.mul_(1 - lr * weight_decay)
+                # perform AdamW weight decay
+                if self.adam_w_mode and weight_decay != 0:
+                    p.mul_(1 - lr * weight_decay)
 
-                    # compute preconditioned gradient and update parameters
-                    state["preconditioners"].precondition_and_update(p, grad, lr)
+                # compute preconditioned gradient and update parameters
+                state["preconditioners"].precondition_and_update(p, grad, lr)
 
         return loss

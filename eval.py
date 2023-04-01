@@ -23,7 +23,7 @@ def main_downstream_process(cfg, setup):
     tokenizer, cfg_arch, model_file = cramming.utils.find_pretrained_checkpoint(cfg)
     tasks = cramming.prepare_task_dataloaders(tokenizer, cfg.eval, cfg.impl)
 
-    metrics = dict()
+    metrics = {}
     stats = defaultdict(list)
     # Start the clocks now:
     for task_name, task in tasks.items():
@@ -79,7 +79,7 @@ def main_downstream_process(cfg, setup):
         # Launch testing:
         if task["extra_validloader"] is not None:
             extra_eval_metric = validate(model_engine, task["extra_validloader"], metric, setup, cfg)
-            metrics[task_name + "extra"] = extra_eval_metric
+            metrics[f"{task_name}extra"] = extra_eval_metric
             for name, metric_val in extra_eval_metric.items():
                 stats[f"{task_name}_{name}_extra"] += [metric_val]
             msg_metrics = " ".join([f"{k}: {v:2.4f}" for k, v in extra_eval_metric.items()])

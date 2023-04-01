@@ -143,13 +143,12 @@ class TransformerLayer(torch.nn.Module):
         elif self.norm_scheme == "sandwich":
             states = self.fn(states, self.norm3(self.dropout(self.attn(self.norm1(states), attention_mask))), self.alpha, res_scale)
             states = self.fn(states, self.norm4(self.dropout(self.ffn(self.norm2(states)))), self.alpha, res_scale)
+        elif self.training:
+            states = self.norm1(self.fn_training(states, self.attn(states, attention_mask), self.alpha, res_scale))
+            states = self.norm2(self.fn_training(states, self.ffn(states), self.alpha, res_scale))
         else:
-            if self.training:
-                states = self.norm1(self.fn_training(states, self.attn(states, attention_mask), self.alpha, res_scale))
-                states = self.norm2(self.fn_training(states, self.ffn(states), self.alpha, res_scale))
-            else:
-                states = self.norm1(self.fn_eval(states, self.attn(states, attention_mask), self.alpha, res_scale))
-                states = self.norm2(self.fn_eval(states, self.ffn(states), self.alpha, res_scale))
+            states = self.norm1(self.fn_eval(states, self.attn(states, attention_mask), self.alpha, res_scale))
+            states = self.norm2(self.fn_eval(states, self.ffn(states), self.alpha, res_scale))
 
         return states
 
@@ -226,17 +225,16 @@ def _get_layer_fn(layer_macro_type):
 
 
 def _get_norm_fn(norm_name):
-    if norm_name == "ScaleNorm":
-        norm_fn = ScriptedScaleNorm
-    elif norm_name == "RMSNorm":
-        norm_fn = ScriptedRMSNorm
-    elif norm_name == "ApexLayerNorm":
+    if norm_name == "ApexLayerNorm":
         from apex.normalization import FusedLayerNorm
 
-        norm_fn = FusedLayerNorm
+        return FusedLayerNorm
+    elif norm_name == "RMSNorm":
+        return ScriptedRMSNorm
+    elif norm_name == "ScaleNorm":
+        return ScriptedScaleNorm
     else:
-        norm_fn = getattr(torch.nn, norm_name)
-    return norm_fn
+        return getattr(torch.nn, norm_name)
 
 
 def _get_nonlin_fn(nonlin_name, use_gating=True):
@@ -252,10 +250,7 @@ def _get_nonlin_fn(nonlin_name, use_gating=True):
     except TypeError:
         nonlin_fn = getattr(torch.nn, nonlin_name)
 
-    if wrap_in_glu:
-        return partial(ScriptedGLU, nonlin_fn)
-    else:
-        return nonlin_fn
+    return partial(ScriptedGLU, nonlin_fn) if wrap_in_glu else nonlin_fn
 
 
 def ScriptedGLU(*args, **kwargs):
@@ -373,6 +368,4 @@ def get_extended_attention_mask(attention_mask: torch.Tensor, input_shape: Tuple
     else:
         raise ValueError(f"Wrong shape for input_ids (shape {input_shape}) or attention_mask (shape {attention_mask.shape})")
 
-    # extended_attention_mask = extended_attention_mask.to(dtype=self.setup["dtype"])  # fp16 compatibility
-    extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-    return extended_attention_mask
+    return (1.0 - extended_attention_mask) * -10000.0

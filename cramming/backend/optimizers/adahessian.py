@@ -49,16 +49,16 @@ class Adahessian(Optimizer):
     """
 
     def __init__(self, params, lr=0.15, betas=(0.9, 0.999), eps=1e-4, weight_decay=0, hessian_power=1, single_gpu=True):
-        if not 0.0 <= lr:
-            raise ValueError("Invalid learning rate: {}".format(lr))
-        if not 0.0 <= eps:
-            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if lr < 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if eps < 0.0:
+            raise ValueError(f"Invalid epsilon value: {eps}")
         if not 0.0 <= betas[0] < 1.0:
-            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
         if not 0.0 <= betas[1] < 1.0:
-            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
         if not 0.0 <= hessian_power <= 1.0:
-            raise ValueError("Invalid Hessian power value: {}".format(hessian_power))
+            raise ValueError(f"Invalid Hessian power value: {hessian_power}")
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, hessian_power=hessian_power)
         self.single_gpu = single_gpu
         super(Adahessian, self).__init__(params, defaults)
@@ -123,10 +123,7 @@ class Adahessian(Optimizer):
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
-        loss = None
-        if closure is not None:
-            loss = closure()
-
+        loss = closure() if closure is not None else None
         params = []
         groups = []
         grads = []

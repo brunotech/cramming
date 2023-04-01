@@ -19,11 +19,19 @@ def group_parameters(model, cfg_train):
     if len(cfg_train.limited_decay_keys) > 0:
         grouped_parameters = optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in model_parameters if not any(nd in n for nd in cfg_train.limited_decay_keys)],
+                "params": [
+                    p
+                    for n, p in model_parameters
+                    if all(nd not in n for nd in cfg_train.limited_decay_keys)
+                ],
                 "weight_decay": cfg_train.optim.weight_decay,
             },
             {
-                "params": [p for n, p in model_parameters if any(nd in n for nd in cfg_train.limited_decay_keys)],
+                "params": [
+                    p
+                    for n, p in model_parameters
+                    if any(nd in n for nd in cfg_train.limited_decay_keys)
+                ],
                 "weight_decay": 0.0,
             },
         ]
@@ -61,13 +69,12 @@ def updated_latest_weight_average(model_parameters, model_buffers, store, last_k
 def torchdynamo_compile_method(method_call, optimizer_arg=None):
     if optimizer_arg is None:
         return method_call
-    else:
-        from torch import _dynamo
+    from torch import _dynamo
 
-        print("Attempting to compile given method with torchdynamo...")
-        _dynamo.config.verbose = True
-        opt_decorator = _dynamo.optimize(backend=optimizer_arg, nopython=False, guard_export_fn=None, disable=False)
-        return opt_decorator(method_call)
+    print("Attempting to compile given method with torchdynamo...")
+    _dynamo.config.verbose = True
+    opt_decorator = _dynamo.optimize(backend=optimizer_arg, nopython=False, guard_export_fn=None, disable=False)
+    return opt_decorator(method_call)
 
 
 def prepare_pretraining_dataloader(dataset, tokenizer, cfg_train, cfg_impl):
@@ -91,15 +98,14 @@ def prepare_pretraining_dataloader(dataset, tokenizer, cfg_train, cfg_impl):
             shuffle=cfg_impl.shuffle_in_dataloader,
             drop_last=True,
         )
+    elif cfg_impl.shuffle_in_dataloader:
+        sampler = torch.utils.data.RandomSampler(dataset)
     else:
-        if cfg_impl.shuffle_in_dataloader:
-            sampler = torch.utils.data.RandomSampler(dataset)
-        else:
-            sampler = torch.utils.data.SequentialSampler(dataset)
+        sampler = torch.utils.data.SequentialSampler(dataset)
 
     if cfg_train.reverse_dataset_order:
         dataset = dataset.select(reversed(range(len(dataset))))
-    repeated_dataloader = InfiniteDataLoader(
+    return InfiniteDataLoader(
         dataset,
         sampler=sampler,
         batch_size=cfg_impl.microbatch_size,
@@ -107,46 +113,50 @@ def prepare_pretraining_dataloader(dataset, tokenizer, cfg_train, cfg_impl):
         pin_memory=cfg_impl.pin_memory,
         drop_last=True,
         prefetch_factor=cfg_impl.prefetch_factor if num_workers > 0 else 2,
-        persistent_workers=cfg_impl.persistent_workers if num_workers > 0 else False,
+        persistent_workers=cfg_impl.persistent_workers
+        if num_workers > 0
+        else False,
         collate_fn=collate_fn,
     )
-    return repeated_dataloader
 
 
 def prepare_downstream_dataloader(dataset, tokenizer, mode, cfg_impl):
-    if mode == "training":
-        if torch.distributed.is_initialized():
-            sampler = torch.utils.data.distributed.DistributedSampler(
-                dataset,
-                shuffle=cfg_impl.shuffle_in_dataloader,
-                drop_last=True,
-            )
-        else:
-            if cfg_impl.shuffle_in_dataloader:
-                sampler = torch.utils.data.RandomSampler(dataset)
-            else:
-                sampler = torch.utils.data.SequentialSampler(dataset)
-    else:
+    if (
+        mode == "training"
+        and not torch.distributed.is_initialized()
+        and cfg_impl.shuffle_in_dataloader
+    ):
+        sampler = torch.utils.data.RandomSampler(dataset)
+    elif (
+        mode == "training"
+        and not torch.distributed.is_initialized()
+        and not cfg_impl.shuffle_in_dataloader
+        or mode != "training"
+    ):
         sampler = torch.utils.data.SequentialSampler(dataset)
-
+    else:
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            shuffle=cfg_impl.shuffle_in_dataloader,
+            drop_last=True,
+        )
     # Implementation details for dataloaders:
     collate_fn = transformers.DataCollatorWithPadding(tokenizer, pad_to_multiple_of=cfg_impl.pad_to_multiple_of)
     os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"  # disable here because otherwise the collation generates a ton of errors
     # collate_fn = transformers.DefaultDataCollator()
     num_workers = get_num_workers(cfg_impl)
 
-    dataloader = DataLoader(
+    return DataLoader(
         dataset,
         batch_size=cfg_impl.microbatch_size,
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=cfg_impl.pin_memory,
-        drop_last=True if mode == "training" else False,
+        drop_last=mode == "training",
         prefetch_factor=cfg_impl.prefetch_factor if num_workers > 0 else 2,
         persistent_workers=False,
         collate_fn=collate_fn,
     )
-    return dataloader
 
 
 """This is a minor modification of huggingface's toking masking:"""
@@ -210,7 +220,7 @@ class PatchedDataCollatorForLanguageModeling(transformers.DataCollatorForLanguag
         # This raises dumb warnings with my latest setup
 
         # So this is the handmade version
-        batch = dict()
+        batch = {}
         for key in examples[0].keys():
             elem = examples[0][key]
             # block = examples[0][key].new_empty(len(examples), *examples[0][key].shape)

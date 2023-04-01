@@ -110,7 +110,7 @@ def run_chains(model, tokenizer, sampling_method="gibbs_mixture_mask_init", devi
                 seq_len = sampler.sentences.shape[1]
                 # exclude first/last tokens (CLS/SEP) from positions
                 rand_list = sampler.get_rand_list(seq_len)
-                for pos_id, pos in enumerate(rand_list):
+                for pos in rand_list:
                     sampler.sentences, sampler.edit_rate = sampler.step(iter_num, pos)
 
             else:

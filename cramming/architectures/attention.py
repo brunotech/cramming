@@ -442,8 +442,7 @@ class TuFormAttention(torch.nn.Module):
 
         # 3 [ b s r]
         (query_layer, key_layer, value_layer) = torch.split(mixed_x_layer, [self.rdim] * 3, dim=-1)
-        context_layer = self.attention(query_layer, key_layer, value_layer, attention_mask)  # b s r
-        return context_layer
+        return self.attention(query_layer, key_layer, value_layer, attention_mask)
 
 
 class SeqFirstTuFormAttention(TuFormAttention):
@@ -480,8 +479,7 @@ class SeqFirstTuFormAttention(TuFormAttention):
 
         # 3 [ b s r]
         (query_layer, key_layer, value_layer) = torch.split(mixed_x_layer, [self.rdim] * 3, dim=-1)
-        context_layer = self.attention(query_layer, key_layer, value_layer, attention_mask)  # b s r
-        return context_layer
+        return self.attention(query_layer, key_layer, value_layer, attention_mask)
 
 
 class SeqFirstTuFormAttention2(TuFormAttention):
@@ -520,8 +518,7 @@ class SeqFirstTuFormAttention2(TuFormAttention):
 
         # 3 [ b s r]
         (query_layer, key_layer, value_layer) = torch.split(mixed_x_layer, [self.rdim] * 3, dim=-1)
-        context_layer = self.attention(query_layer, key_layer, value_layer, attention_mask)  # b s r
-        return context_layer
+        return self.attention(query_layer, key_layer, value_layer, attention_mask)
 
 
 class FourierMixing(torch.nn.Module):
@@ -689,8 +686,7 @@ class TorchSoftmax(torch.nn.Module):
                 attention_mask = attention_mask.to(dtype=torch.float)
         if attention_mask is not None:
             inputs = inputs + attention_mask
-        probs = torch.softmax(inputs, dim=-1).to(dtype=input_dtype)
-        return probs
+        return torch.softmax(inputs, dim=-1).to(dtype=input_dtype)
 
 
 class TorchNormalize(torch.nn.Module):

@@ -10,15 +10,13 @@ log = logging.getLogger(__name__)
 
 def lookup_dtype(vocab_size):
     if vocab_size < 2**8:
-        dtype = torch.uint8
-    # would really be neat to have uint16 here between the BERT and GPT encoding sizes
+        return torch.uint8
     elif vocab_size < 2**16 // 2:
-        dtype = torch.int16
+        return torch.int16
     elif vocab_size < 2**32 // 2:
-        dtype = torch.int32
+        return torch.int32
     else:
-        dtype = torch.int64
-    return dtype
+        return torch.int64
 
 
 class CachedDataset(torch.utils.data.Dataset):
@@ -43,7 +41,7 @@ class CachedDataset(torch.utils.data.Dataset):
         )
         self.dataset_keys = list(dataset[0].keys())
         seq_lengths = [len(dataset[0][k]) for k in self.dataset_keys]
-        assert all([length == seq_lengths[0] for length in seq_lengths])
+        assert all(length == seq_lengths[0] for length in seq_lengths)
 
         # Allocate memory:
         pin = target_device == torch.device("cpu") and torch.cuda.is_available()
@@ -63,8 +61,12 @@ class CachedDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         """Get sample, target from cache."""
         sample_data_block = self.cache[index]
-        sample_dict = dict(zip(self.dataset_keys, torch.chunk(sample_data_block, len(self.dataset_keys), dim=-1)))
-        return sample_dict
+        return dict(
+            zip(
+                self.dataset_keys,
+                torch.chunk(sample_data_block, len(self.dataset_keys), dim=-1),
+            )
+        )
 
     def __len__(self):
         """Length is length of self.dataset."""

@@ -29,14 +29,14 @@ def construct_model(cfg_arch, vocab_size, downstream_classes=None):
             model = construct_fixed_cramlm(cfg_arch, vocab_size, downstream_classes)
 
     if model is not None:  # Return local model arch
-        num_params = sum([p.numel() for p in model.parameters()])
+        num_params = sum(p.numel() for p in model.parameters())
         if is_main_process():
             log.info(f"Model with architecture {cfg_arch.architectures[0]} loaded with {num_params:,} parameters.")
         return model
 
     try:  # else try on HF
         model = construct_huggingface_model(cfg_arch, vocab_size, downstream_classes)
-        num_params = sum([p.numel() for p in model.parameters()])
+        num_params = sum(p.numel() for p in model.parameters())
         if is_main_process():
             log.info(f"Model with config {cfg_arch} loaded with {num_params:,} parameters.")
         return model

@@ -62,7 +62,9 @@ def matrix_inverse_root(
         if termination_flag == NewtonConvergenceFlag.REACHED_MAX_ITERS:
             logging.warning("Newton did not converge and reached maximum number of iterations!")
     else:
-        raise NotImplementedError("Root inverse method is not implemented! Specified root inverse method is " + str(root_inv_method) + ".")
+        raise NotImplementedError(
+            f"Root inverse method is not implemented! Specified root inverse method is {str(root_inv_method)}."
+        )
 
     return X
 
